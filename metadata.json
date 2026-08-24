@@ -1,0 +1,6 @@
+{
+  "name": "Distributed Job Scheduler",
+  "description": "Production-grade distributed job scheduler with multi-tenant queues, atomic lease-based workers, PostgreSQL persistence, and observability dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
