@@ -1,4 +1,4 @@
-import { JobStatus, JobType, OrgRole, RetryStrategy, WorkerStatus } from '@prisma/client';
+import { JobStatus, JobType, OrganizationRole, RetryStrategy, WorkerStatus } from '@prisma/client';
 
 export interface AuthUser {
   id: string;
@@ -9,7 +9,7 @@ export interface AuthUser {
 export interface TenantContext {
   userId: string;
   organizationId: string;
-  role: OrgRole;
+  role: OrganizationRole;
   projectId?: string;
 }
 

@@ -1,8 +1,16 @@
 import { Router, Request, Response } from 'express';
 import swaggerUi from 'swagger-ui-express';
 import { openApiSpec } from '../openapi.ts';
+import { authRouter } from './authRoutes.ts';
+import { orgRouter } from './orgRoutes.ts';
+import { projectRouter } from './projectRoutes.ts';
+import { queueRouter } from './queueRoutes.ts';
+import { jobRouter } from './jobRoutes.ts';
+import { workerRouter } from './workerRoutes.ts';
+import { dlqRouter } from './dlqRoutes.ts';
 
 export const apiRouter = Router();
+
 
 // Swagger Documentation Route
 const swaggerServe = (swaggerUi as any).serve || (swaggerUi as any).default?.serve;
@@ -41,3 +49,14 @@ apiRouter.get('/info', (req: Request, res: Response) => {
     },
   });
 });
+
+// Mount Core Domain API Routes
+apiRouter.use('/auth', authRouter);
+apiRouter.use('/organizations', orgRouter);
+apiRouter.use('/projects', projectRouter);
+apiRouter.use('/workers', workerRouter);
+apiRouter.use('/', queueRouter);
+apiRouter.use('/', jobRouter);
+apiRouter.use('/', dlqRouter);
+
+
