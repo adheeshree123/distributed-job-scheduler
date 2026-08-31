@@ -84,7 +84,7 @@ describe('PHASE 6 INTEGRATION: Distributed Worker Service & Atomic Claiming', ()
       processId: process.pid,
     });
 
-    await workerService.start({ autoPoll: false });
+    await workerService.start({ autoPoll: false, backgroundLoops: false });
 
     // Verify worker in DB
     const dbWorker = await prisma.worker.findUnique({
@@ -134,6 +134,9 @@ describe('PHASE 6 INTEGRATION: Distributed Worker Service & Atomic Claiming', ()
   });
 
   test('3. CRITICAL CONCURRENCY: Two workers competing for ONE job -> Exactly ONE succeeds', async () => {
+    // Ensure only one job exists in queue for race condition test
+    await prisma.job.deleteMany({ where: { queueId } });
+
     // Create a single competing job
     const jobRes = await request(app)
       .post(`/api/queues/${queueId}/jobs`)
@@ -294,6 +297,9 @@ describe('PHASE 6 INTEGRATION: Distributed Worker Service & Atomic Claiming', ()
   });
 
   test('7. Worker observability APIs return active workers and heartbeat metrics', async () => {
+    // Refresh heartbeat
+    await workerService.leaseManager.sendHeartbeatAndExtendLeases();
+
     // List workers
     const listRes = await request(app)
       .get('/api/workers')
