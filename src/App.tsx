@@ -1,300 +1,507 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  Server,
+  LayoutDashboard,
+  ListOrdered,
   Layers,
   Cpu,
-  RotateCw,
-  AlertTriangle,
   Calendar,
-  Activity,
+  AlertTriangle,
+  AlertOctagon,
   ShieldCheck,
+  Settings2,
+  Plus,
+  Zap,
   BookOpen,
-  CheckCircle2,
-  Clock,
-  ArrowRight,
-  Database,
-  Terminal,
 } from 'lucide-react';
-
-interface SystemHealth {
-  status: string;
-  timestamp: string;
-  service: string;
-  version: string;
-  env: string;
-}
+import {
+  Job,
+  Queue,
+  WorkerInfo,
+  DashboardMetrics,
+  WorkerDaemonStatus,
+  RetryPolicy,
+} from './types';
+import { Api } from './services/api';
+import { Navbar } from './components/Navbar';
+import { DashboardView } from './components/DashboardView';
+import { JobsView } from './components/JobsView';
+import { QueuesView } from './components/QueuesView';
+import { WorkersView } from './components/WorkersView';
+import { DLQView } from './components/DLQView';
+import { CronView } from './components/CronView';
+import { ArchitectureView } from './components/ArchitectureView';
+import { SettingsView } from './components/SettingsView';
+import { CreateJobModal } from './components/CreateJobModal';
+import { JobDetailDrawer } from './components/JobDetailDrawer';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'queues' | 'workers' | 'dlq' | 'cron' | 'arch'>('overview');
-  const [health, setHealth] = useState<SystemHealth | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [activeTab, setActiveTab] = useState<
+    'dashboard' | 'jobs' | 'queues' | 'workers' | 'failed' | 'schedules' | 'system' | 'settings'
+  >('dashboard');
 
+  const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
+  const [daemonStatus, setDaemonStatus] = useState<WorkerDaemonStatus | null>(null);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [totalJobs, setTotalJobs] = useState<number>(0);
+  const [totalPages, setTotalPages] = useState<number>(1);
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [queues, setQueues] = useState<Queue[]>([]);
+  const [workers, setWorkers] = useState<WorkerInfo[]>([]);
+  const [retryPolicies, setRetryPolicies] = useState<RetryPolicy[]>([]);
+
+  // Filters & Drawer State
+  const [statusFilter, setStatusFilter] = useState<string>('');
+  const [queueFilter, setQueueFilter] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [selectedJob, setSelectedJob] = useState<Job | null>(null);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
+  const [refreshInterval, setRefreshInterval] = useState<number>(1500);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [notification, setNotification] = useState<{ type: 'success' | 'info' | 'error'; message: string } | null>(
+    null
+  );
+
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const showNotification = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
+    setNotification({ type, message });
+    setTimeout(() => setNotification(null), 3500);
+  };
+
+  // Main Data Fetcher
+  const fetchData = useCallback(async (silent = true) => {
+    if (!silent) setIsRefreshing(true);
+
+    try {
+      const [metricsData, daemonData, queuesData, jobsData, workersData, policiesData] = await Promise.all([
+        Api.getMetrics().catch(() => null),
+        Api.getDaemonStatus().catch(() => null),
+        Api.listQueues().catch(() => []),
+        Api.listJobs({
+          status: statusFilter || undefined,
+          queueId: queueFilter || undefined,
+          search: searchQuery || undefined,
+          page: currentPage,
+          limit: 25,
+        }).catch(() => ({ data: [], meta: { total: 0, totalPages: 1, page: 1, limit: 25 } })),
+        Api.listWorkers().catch(() => []),
+        Api.listRetryPolicies().catch(() => []),
+      ]);
+
+      if (metricsData) setMetrics(metricsData);
+      if (daemonData) setDaemonStatus(daemonData);
+      if (queuesData) setQueues(queuesData);
+      if (jobsData) {
+        setJobs(jobsData.data);
+        setTotalJobs(jobsData.meta.total);
+        setTotalPages(jobsData.meta.totalPages);
+      }
+      if (workersData) setWorkers(workersData);
+      if (policiesData) setRetryPolicies(policiesData);
+
+      // If a job is currently inspected in drawer, refresh its state
+      if (selectedJob && jobsData?.data) {
+        const updatedSelected = jobsData.data.find((j: Job) => j.id === selectedJob.id);
+        if (updatedSelected) {
+          setSelectedJob(updatedSelected);
+        }
+      }
+    } catch (err) {
+      console.error('Error polling dashboard data:', err);
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [statusFilter, queueFilter, searchQuery, currentPage, selectedJob]);
+
+  // Polling Loop
   useEffect(() => {
-    fetch('/api/health')
-      .then((res) => res.json())
-      .then((data) => {
-        setHealth(data);
-        setLoading(false);
-      })
-      .catch((err) => {
-        console.error('Health fetch failed:', err);
-        setLoading(false);
-      });
-  }, []);
+    fetchData(false);
+
+    if (refreshInterval > 0) {
+      timerRef.current = setInterval(() => {
+        fetchData(true);
+      }, refreshInterval);
+    }
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [fetchData, refreshInterval]);
+
+  // Worker Daemon Actions
+  const handleStartDaemon = async () => {
+    try {
+      await Api.startDaemon();
+      showNotification('Worker engine activated (auto-polling mode)');
+      fetchData(false);
+    } catch (err: any) {
+      showNotification(`Failed to start worker: ${err.message}`, 'error');
+    }
+  };
+
+  const handleStopDaemon = async () => {
+    try {
+      await Api.stopDaemon();
+      showNotification('Worker engine paused');
+      fetchData(false);
+    } catch (err: any) {
+      showNotification(`Failed to stop worker: ${err.message}`, 'error');
+    }
+  };
+
+  const handleStepDaemon = async () => {
+    try {
+      const res = await Api.stepDaemon();
+      showNotification(res.message, res.claimedCount > 0 ? 'success' : 'info');
+      fetchData(false);
+    } catch (err: any) {
+      showNotification(`Error stepping worker: ${err.message}`, 'error');
+    }
+  };
+
+  const handleRetryJob = async (id: string) => {
+    try {
+      const updated = await Api.retryJob(id);
+      showNotification(`Job re-queued for execution!`);
+      setSelectedJob(updated);
+      fetchData(false);
+    } catch (err: any) {
+      showNotification(`Failed to retry job: ${err.message}`, 'error');
+    }
+  };
+
+  const handleJobCreated = (newJob: Job) => {
+    showNotification(`Job created and placed in queue!`);
+    setSelectedJob(newJob);
+    fetchData(false);
+  };
+
+  const handleQuickLaunch = async (templateType: string) => {
+    if (queues.length === 0) {
+      showNotification('No active queues found', 'error');
+      return;
+    }
+    const targetQueue = queues[0].id;
+    let jobData: any = { type: 'IMMEDIATE', priority: 0, maxAttempts: 3 };
+
+    if (templateType === 'echo') {
+      jobData.payload = {
+        type: 'echo',
+        taskName: 'Send Welcome Email',
+        recipient: 'user@example.com',
+      };
+    } else if (templateType === 'fail-once') {
+      jobData.payload = {
+        type: 'fail-once',
+        taskName: 'Sync External API (Auto-Retry Demo)',
+        note: 'Fails on attempt 1, automatically succeeds on attempt 2',
+      };
+    } else if (templateType === 'fatal-dlq') {
+      jobData.payload = {
+        type: 'fail',
+        taskName: 'Payment Gateway (Fatal DLQ Demo)',
+        error: 'Card processor declined token: FATAL_UNAUTHORIZED',
+      };
+    } else if (templateType === 'sleep') {
+      jobData.payload = {
+        type: 'sleep',
+        taskName: 'Transcode 4K Video (Long Running)',
+        durationMs: 4000,
+      };
+    }
+
+    try {
+      const created = await Api.createJob(targetQueue, jobData);
+      showNotification(`Launched "${jobData.payload.taskName}"!`);
+      setSelectedJob(created);
+      fetchData(false);
+    } catch (err: any) {
+      showNotification(`Failed to launch task: ${err.message}`, 'error');
+    }
+  };
+
+  const handleNavigateTab = (tab: any, filter?: string) => {
+    setActiveTab(tab);
+    if (filter !== undefined) {
+      setStatusFilter(filter);
+    }
+  };
+
+  const dlqCount = metrics?.dlqJobs ?? 0;
 
   return (
-    <div id="app-root" className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans antialiased">
-      {/* Top Header */}
-      <header id="app-header" className="border-b border-neutral-800 bg-neutral-900/80 backdrop-blur px-6 py-4 flex items-center justify-between sticky top-0 z-30">
-        <div className="flex items-center space-x-3">
-          <div className="h-9 w-9 rounded-lg bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
-            <Server className="h-5 w-5" />
-          </div>
-          <div>
-            <div className="flex items-center space-x-2">
-              <h1 className="font-semibold text-base tracking-tight text-white">Distributed Job Scheduler</h1>
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                v1.0.0-foundation
-              </span>
-            </div>
-            <p className="text-xs text-neutral-400">Production-grade distributed task execution engine</p>
-          </div>
-        </div>
+    <div
+      id="app-root"
+      className="min-h-screen bg-slate-50/70 text-slate-900 flex flex-col font-sans antialiased selection:bg-indigo-500 selection:text-white"
+    >
+      {/* Top Navbar Header */}
+      <Navbar
+        daemonStatus={daemonStatus}
+        onStartDaemon={handleStartDaemon}
+        onStopDaemon={handleStopDaemon}
+        onStepDaemon={handleStepDaemon}
+        onOpenCreateModal={() => setIsCreateModalOpen(true)}
+        refreshInterval={refreshInterval}
+        setRefreshInterval={setRefreshInterval}
+        onManualRefresh={() => fetchData(false)}
+        isRefreshing={isRefreshing}
+      />
 
-        <div className="flex items-center space-x-4">
-          <div className="flex items-center space-x-2 text-xs text-neutral-300 font-mono bg-neutral-900 px-3 py-1.5 rounded-md border border-neutral-800">
-            <span className={`h-2 w-2 rounded-full ${health?.status === 'ok' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
-            <span>API Engine: {loading ? 'checking...' : health?.status === 'ok' ? 'Operational' : 'Ready'}</span>
-          </div>
-          <a
-            href="/api/docs"
-            target="_blank"
-            rel="noreferrer"
-            className="flex items-center space-x-1.5 text-xs bg-neutral-800 hover:bg-neutral-700 text-neutral-200 px-3 py-1.5 rounded-md border border-neutral-700 transition"
+      {/* Floating Notification Toast */}
+      {notification && (
+        <div className="fixed bottom-6 right-6 z-50 transition transform animate-in slide-in-from-bottom-5">
+          <div
+            className={`px-4 py-3 rounded-2xl border text-xs font-semibold shadow-xl flex items-center space-x-2 ${
+              notification.type === 'success'
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                : notification.type === 'error'
+                ? 'bg-rose-50 text-rose-800 border-rose-300'
+                : 'bg-indigo-50 text-indigo-800 border-indigo-300'
+            }`}
           >
-            <BookOpen className="h-3.5 w-3.5" />
-            <span>OpenAPI Docs</span>
-          </a>
+            <span>{notification.message}</span>
+          </div>
         </div>
-      </header>
+      )}
 
-      {/* Main Layout */}
-      <div className="flex-1 flex max-w-7xl w-full mx-auto p-6 gap-6">
+      {/* Main Layout Container */}
+      <div className="flex-1 flex max-w-7xl w-full mx-auto p-4 lg:p-6 gap-6">
         {/* Navigation Sidebar */}
-        <aside className="w-64 flex-shrink-0 space-y-1">
-          <nav className="space-y-1 bg-neutral-900/50 p-2 rounded-xl border border-neutral-800">
+        <aside className="w-56 flex-shrink-0 hidden md:block space-y-4">
+          <div className="bg-white p-2 rounded-2xl border border-slate-200 shadow-xs space-y-1">
+            <div className="px-3 py-1.5 text-[10px] uppercase font-mono tracking-wider text-slate-400 font-bold">
+              Main Menu
+            </div>
+
+            {/* Dashboard */}
             <button
-              onClick={() => setActiveTab('overview')}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-xs font-medium transition ${
-                activeTab === 'overview'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/60'
+              onClick={() => setActiveTab('dashboard')}
+              className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl text-xs font-medium transition cursor-pointer ${
+                activeTab === 'dashboard'
+                  ? 'bg-indigo-600 text-white shadow-xs font-semibold'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
               }`}
             >
-              <Activity className="h-4 w-4" />
-              <span>System Overview</span>
+              <LayoutDashboard className="h-4 w-4" />
+              <span>Dashboard</span>
             </button>
+
+            {/* Jobs */}
+            <button
+              onClick={() => setActiveTab('jobs')}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-medium transition cursor-pointer ${
+                activeTab === 'jobs'
+                  ? 'bg-indigo-600 text-white shadow-xs font-semibold'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              <div className="flex items-center space-x-2.5">
+                <ListOrdered className="h-4 w-4" />
+                <span>Jobs</span>
+              </div>
+              <span
+                className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full ${
+                  activeTab === 'jobs' ? 'bg-indigo-700 text-white' : 'bg-slate-100 text-slate-600'
+                }`}
+              >
+                {metrics?.totalJobs ?? 0}
+              </span>
+            </button>
+
+            {/* Queues */}
             <button
               onClick={() => setActiveTab('queues')}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-xs font-medium transition ${
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-medium transition cursor-pointer ${
                 activeTab === 'queues'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/60'
+                  ? 'bg-indigo-600 text-white shadow-xs font-semibold'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
               }`}
             >
-              <Layers className="h-4 w-4" />
-              <span>Queues & Concurrency</span>
+              <div className="flex items-center space-x-2.5">
+                <Layers className="h-4 w-4" />
+                <span>Queues</span>
+              </div>
+              <span className="text-[10px] font-mono text-slate-400">{queues.length}</span>
             </button>
+
+            {/* Workers */}
             <button
               onClick={() => setActiveTab('workers')}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-xs font-medium transition ${
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-medium transition cursor-pointer ${
                 activeTab === 'workers'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/60'
+                  ? 'bg-indigo-600 text-white shadow-xs font-semibold'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
               }`}
             >
-              <Cpu className="h-4 w-4" />
-              <span>Worker Fleet & Leases</span>
+              <div className="flex items-center space-x-2.5">
+                <Cpu className="h-4 w-4" />
+                <span>Workers</span>
+              </div>
+              <span className="text-[10px] font-mono text-slate-400">{workers.length}</span>
             </button>
+
+            {/* Schedules */}
             <button
-              onClick={() => setActiveTab('dlq')}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-xs font-medium transition ${
-                activeTab === 'dlq'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/60'
-              }`}
-            >
-              <AlertTriangle className="h-4 w-4" />
-              <span>Dead Letter Queue</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('cron')}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-xs font-medium transition ${
-                activeTab === 'cron'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/60'
+              onClick={() => setActiveTab('schedules')}
+              className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl text-xs font-medium transition cursor-pointer ${
+                activeTab === 'schedules'
+                  ? 'bg-indigo-600 text-white shadow-xs font-semibold'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
               }`}
             >
               <Calendar className="h-4 w-4" />
-              <span>Cron & Scheduled</span>
+              <span>Schedules</span>
             </button>
+
+            {/* Failed Jobs */}
             <button
-              onClick={() => setActiveTab('arch')}
-              className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-xs font-medium transition ${
-                activeTab === 'arch'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/60'
+              onClick={() => setActiveTab('failed')}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-medium transition cursor-pointer ${
+                activeTab === 'failed'
+                  ? 'bg-indigo-600 text-white shadow-xs font-semibold'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              <div className="flex items-center space-x-2.5">
+                <AlertOctagon className="h-4 w-4 text-rose-500" />
+                <span>Failed Jobs</span>
+              </div>
+              {dlqCount > 0 && (
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-rose-100 text-rose-800 font-bold border border-rose-200">
+                  {dlqCount}
+                </span>
+              )}
+            </button>
+
+            <div className="pt-2 px-3 pb-1 text-[10px] uppercase font-mono tracking-wider text-slate-400 font-bold">
+              Engineering
+            </div>
+
+            {/* System Specs */}
+            <button
+              onClick={() => setActiveTab('system')}
+              className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl text-xs font-medium transition cursor-pointer ${
+                activeTab === 'system'
+                  ? 'bg-indigo-600 text-white shadow-xs font-semibold'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
               }`}
             >
               <ShieldCheck className="h-4 w-4" />
-              <span>Architecture & Specs</span>
+              <span>System & Specs</span>
             </button>
-          </nav>
 
-          {/* Database Specs Card */}
-          <div className="bg-neutral-900/40 p-4 rounded-xl border border-neutral-800 text-xs space-y-2 mt-4">
-            <div className="flex items-center space-x-2 text-neutral-300 font-semibold">
-              <Database className="h-4 w-4 text-indigo-400" />
-              <span>Relational Storage</span>
+            {/* Settings */}
+            <button
+              onClick={() => setActiveTab('settings')}
+              className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl text-xs font-medium transition cursor-pointer ${
+                activeTab === 'settings'
+                  ? 'bg-indigo-600 text-white shadow-xs font-semibold'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              <Settings2 className="h-4 w-4" />
+              <span>Settings</span>
+            </button>
+          </div>
+
+          {/* Helper Card */}
+          <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs text-xs space-y-2">
+            <div className="flex items-center space-x-1.5 text-indigo-600 font-semibold text-[11px] uppercase tracking-wider">
+              <BookOpen className="h-3.5 w-3.5" />
+              <span>Quick Tip</span>
             </div>
-            <p className="text-neutral-400 text-[11px] leading-relaxed">
-              PostgreSQL schema managed via Prisma ORM with row-level locking indexes for SKIP LOCKED claiming.
+            <p className="text-slate-600 text-[11px] leading-relaxed">
+              Use <strong>+ Create Job</strong> to launch background tasks, or run 1-click test tasks from the dashboard.
             </p>
           </div>
         </aside>
 
-        {/* Content Area */}
-        <main className="flex-1 space-y-6">
-          {/* Phase 1 Verification Banner */}
-          <div className="bg-indigo-950/40 border border-indigo-500/30 rounded-xl p-5">
-            <div className="flex items-start justify-between">
-              <div>
-                <div className="flex items-center space-x-2">
-                  <CheckCircle2 className="h-5 w-5 text-indigo-400" />
-                  <h2 className="text-sm font-semibold text-white">Phase 1: Project Foundation & Architecture Verified</h2>
-                </div>
-                <p className="text-xs text-neutral-300 mt-1">
-                  Core monorepo architecture, Prisma relational schema, worker processor skeletons, and OpenAPI documentation pipeline are configured and compiled.
-                </p>
-              </div>
-              <span className="px-2.5 py-1 text-[11px] font-mono rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
-                Foundation Ready
-              </span>
-            </div>
-
-            <div className="grid grid-cols-3 gap-3 mt-4 pt-4 border-t border-indigo-500/20 text-xs">
-              <div className="bg-neutral-900/60 p-2.5 rounded-lg border border-neutral-800">
-                <span className="text-neutral-400 block text-[10px] uppercase font-mono tracking-wider">Storage Engine</span>
-                <span className="font-semibold text-neutral-200">PostgreSQL (Prisma 7)</span>
-              </div>
-              <div className="bg-neutral-900/60 p-2.5 rounded-lg border border-neutral-800">
-                <span className="text-neutral-400 block text-[10px] uppercase font-mono tracking-wider">Claiming Guarantee</span>
-                <span className="font-semibold text-neutral-200">SKIP LOCKED Row Locks</span>
-              </div>
-              <div className="bg-neutral-900/60 p-2.5 rounded-lg border border-neutral-800">
-                <span className="text-neutral-400 block text-[10px] uppercase font-mono tracking-wider">Fault Tolerance</span>
-                <span className="font-semibold text-neutral-200">Lease Expiry + Heartbeats</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Tab Content */}
-          {activeTab === 'overview' && (
-            <div className="space-y-6">
-              {/* Metric Cards */}
-              <div className="grid grid-cols-4 gap-4">
-                <div className="bg-neutral-900/60 p-4 rounded-xl border border-neutral-800">
-                  <div className="flex items-center justify-between text-neutral-400 text-xs mb-1">
-                    <span>Queued Jobs</span>
-                    <Clock className="h-4 w-4 text-amber-400" />
-                  </div>
-                  <div className="text-2xl font-bold font-mono text-white">0</div>
-                  <span className="text-[11px] text-neutral-400">Waiting execution</span>
-                </div>
-                <div className="bg-neutral-900/60 p-4 rounded-xl border border-neutral-800">
-                  <div className="flex items-center justify-between text-neutral-400 text-xs mb-1">
-                    <span>Active Workers</span>
-                    <Cpu className="h-4 w-4 text-emerald-400" />
-                  </div>
-                  <div className="text-2xl font-bold font-mono text-white">1</div>
-                  <span className="text-[11px] text-neutral-400">Heartbeat healthy</span>
-                </div>
-                <div className="bg-neutral-900/60 p-4 rounded-xl border border-neutral-800">
-                  <div className="flex items-center justify-between text-neutral-400 text-xs mb-1">
-                    <span>Processed (24h)</span>
-                    <RotateCw className="h-4 w-4 text-indigo-400" />
-                  </div>
-                  <div className="text-2xl font-bold font-mono text-white">0</div>
-                  <span className="text-[11px] text-neutral-400">Success rate: 100%</span>
-                </div>
-                <div className="bg-neutral-900/60 p-4 rounded-xl border border-neutral-800">
-                  <div className="flex items-center justify-between text-neutral-400 text-xs mb-1">
-                    <span>Dead Letter Queue</span>
-                    <AlertTriangle className="h-4 w-4 text-rose-400" />
-                  </div>
-                  <div className="text-2xl font-bold font-mono text-white">0</div>
-                  <span className="text-[11px] text-neutral-400">Exhausted retries</span>
-                </div>
-              </div>
-
-              {/* Architecture Blueprint Section */}
-              <div className="bg-neutral-900/60 p-5 rounded-xl border border-neutral-800 space-y-4">
-                <h3 className="text-sm font-semibold text-white flex items-center space-x-2">
-                  <Terminal className="h-4 w-4 text-indigo-400" />
-                  <span>Distributed Job Lifecycle State Machine</span>
-                </h3>
-
-                <div className="flex items-center justify-between p-4 bg-neutral-950 rounded-lg border border-neutral-800 text-xs font-mono overflow-x-auto">
-                  <div className="text-center px-3 py-2 bg-neutral-900 rounded border border-neutral-700">
-                    <span className="text-amber-400 font-semibold block">QUEUED</span>
-                    <span className="text-[10px] text-neutral-400">scheduledAt &lt;= NOW()</span>
-                  </div>
-                  <ArrowRight className="h-4 w-4 text-neutral-500 flex-shrink-0 mx-2" />
-                  <div className="text-center px-3 py-2 bg-neutral-900 rounded border border-neutral-700">
-                    <span className="text-blue-400 font-semibold block">CLAIMED</span>
-                    <span className="text-[10px] text-neutral-400">SKIP LOCKED</span>
-                  </div>
-                  <ArrowRight className="h-4 w-4 text-neutral-500 flex-shrink-0 mx-2" />
-                  <div className="text-center px-3 py-2 bg-neutral-900 rounded border border-neutral-700">
-                    <span className="text-purple-400 font-semibold block">RUNNING</span>
-                    <span className="text-[10px] text-neutral-400">30s Lease & Heartbeat</span>
-                  </div>
-                  <ArrowRight className="h-4 w-4 text-neutral-500 flex-shrink-0 mx-2" />
-                  <div className="text-center px-3 py-2 bg-neutral-900 rounded border border-neutral-700">
-                    <span className="text-emerald-400 font-semibold block">COMPLETED</span>
-                    <span className="text-[10px] text-neutral-400">Persist result</span>
-                  </div>
-                  <span className="text-neutral-500 text-xs mx-1">OR</span>
-                  <div className="text-center px-3 py-2 bg-neutral-900 rounded border border-neutral-700">
-                    <span className="text-rose-400 font-semibold block">FAILED / DLQ</span>
-                    <span className="text-[10px] text-neutral-400">Retry backoff</span>
-                  </div>
-                </div>
-              </div>
-            </div>
+        {/* Primary Content View */}
+        <main className="flex-1 space-y-6 min-w-0">
+          {activeTab === 'dashboard' && (
+            <DashboardView
+              metrics={metrics}
+              jobs={jobs}
+              queues={queues}
+              daemonStatus={daemonStatus}
+              onSelectJob={setSelectedJob}
+              onRetryJob={handleRetryJob}
+              onOpenCreateModal={() => setIsCreateModalOpen(true)}
+              onQuickLaunch={handleQuickLaunch}
+              onNavigateTab={handleNavigateTab}
+              onStepDaemon={handleStepDaemon}
+            />
           )}
 
-          {activeTab === 'arch' && (
-            <div className="bg-neutral-900/60 p-6 rounded-xl border border-neutral-800 space-y-4 text-xs">
-              <h3 className="text-base font-semibold text-white">System Architecture & Core Invariants</h3>
-              <ul className="list-disc pl-5 space-y-2 text-neutral-300">
-                <li>
-                  <strong className="text-white">Relational PostgreSQL Source of Truth:</strong> Job states, execution records, worker heartbeats, and DLQ entries persist in PostgreSQL.
-                </li>
-                <li>
-                  <strong className="text-white">Atomic Concurrency via Row-Level Locks:</strong> Workers claim jobs inside ACID transactions using <code className="text-indigo-300 font-mono">SELECT ... FOR UPDATE SKIP LOCKED</code>, strictly preventing duplicate claiming across concurrent workers.
-                </li>
-                <li>
-                  <strong className="text-white">Lease-Based Crash Recovery:</strong> Active executions maintain a dynamic lease (<code className="text-indigo-300 font-mono">leaseExpiresAt</code>). If a worker crashes or drops heartbeats, orphan jobs are safely recovered by remaining workers.
-                </li>
-                <li>
-                  <strong className="text-white">Multi-Tenant Isolation:</strong> Strict relational hierarchy from User &rarr; OrganizationMember &rarr; Organization &rarr; Project &rarr; Queue &rarr; Job.
-                </li>
-              </ul>
-            </div>
+          {activeTab === 'jobs' && (
+            <JobsView
+              jobs={jobs}
+              queues={queues}
+              totalJobs={totalJobs}
+              currentPage={currentPage}
+              totalPages={totalPages}
+              onPageChange={setCurrentPage}
+              statusFilter={statusFilter}
+              onStatusFilterChange={setStatusFilter}
+              queueFilter={queueFilter}
+              onQueueFilterChange={setQueueFilter}
+              searchQuery={searchQuery}
+              onSearchQueryChange={setSearchQuery}
+              onSelectJob={setSelectedJob}
+              onRetryJob={handleRetryJob}
+              onOpenCreateModal={() => setIsCreateModalOpen(true)}
+              onStepDaemon={handleStepDaemon}
+              isLoading={isRefreshing}
+            />
+          )}
+
+          {activeTab === 'queues' && (
+            <QueuesView queues={queues} onRefresh={() => fetchData(false)} />
+          )}
+
+          {activeTab === 'workers' && (
+            <WorkersView
+              workers={workers}
+              daemonStatus={daemonStatus}
+              onStartDaemon={handleStartDaemon}
+              onStopDaemon={handleStopDaemon}
+              onStepDaemon={handleStepDaemon}
+              onRefresh={() => fetchData(false)}
+            />
+          )}
+
+          {activeTab === 'failed' && (
+            <DLQView onRetrySuccess={() => fetchData(false)} />
+          )}
+
+          {activeTab === 'schedules' && <CronView />}
+
+          {activeTab === 'system' && <ArchitectureView />}
+
+          {activeTab === 'settings' && (
+            <SettingsView
+              refreshInterval={refreshInterval}
+              setRefreshInterval={setRefreshInterval}
+            />
           )}
         </main>
       </div>
+
+      {/* Create Job Modal */}
+      <CreateJobModal
+        isOpen={isCreateModalOpen}
+        onClose={() => setIsCreateModalOpen(false)}
+        queues={queues}
+        retryPolicies={retryPolicies}
+        onJobCreated={handleJobCreated}
+      />
+
+      {/* Deep Inspection Drawer */}
+      <JobDetailDrawer
+        job={selectedJob}
+        onClose={() => setSelectedJob(null)}
+        onRetry={handleRetryJob}
+      />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 {
-  "name": "Distributed Job Scheduler",
-  "description": "Production-grade distributed job scheduler with multi-tenant queues, atomic lease-based workers, PostgreSQL persistence, and observability dashboard.",
+  "name": "Job Scheduler",
+  "description": "Manage and automate background tasks with ease. Monitor active jobs, view execution history, manage queues and workers, and recover failed jobs with one click.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

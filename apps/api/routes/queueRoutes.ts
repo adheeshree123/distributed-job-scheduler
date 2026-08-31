@@ -1,5 +1,6 @@
 import { Router, Response, NextFunction } from 'express';
 import { QueueService } from '../services/queueService.ts';
+import prisma from '../../../src/db/prisma.ts';
 import {
   createQueueSchema,
   updateQueueSchema,
@@ -16,6 +17,88 @@ export const queueRouter = Router();
 
 // Apply JWT authentication to all queue routes
 queueRouter.use(authenticateJwt);
+
+// --- Global Accessible Queues & Retry Policies for Frontend Dashboard ---
+queueRouter.get('/queues', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const queues = await prisma.queue.findMany({
+      orderBy: [{ priority: 'desc' }, { createdAt: 'desc' }],
+      include: {
+        project: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            organization: {
+              select: { id: true, name: true },
+            },
+          },
+        },
+        retryPolicy: true,
+        _count: {
+          select: {
+            jobs: true,
+            deadLetterJobs: true,
+            scheduledJobs: true,
+          },
+        },
+      },
+    });
+
+    // Calculate live job stats for each queue
+    const queuesWithStats = await Promise.all(
+      queues.map(async (q) => {
+        const [queued, running, completed, failed] = await Promise.all([
+          prisma.job.count({
+            where: { queueId: q.id, status: { in: ['QUEUED', 'SCHEDULED'] } },
+          }),
+          prisma.job.count({
+            where: { queueId: q.id, status: { in: ['CLAIMED', 'RUNNING'] } },
+          }),
+          prisma.job.count({
+            where: { queueId: q.id, status: 'COMPLETED' },
+          }),
+          prisma.job.count({
+            where: { queueId: q.id, status: 'FAILED' },
+          }),
+        ]);
+
+        return {
+          ...q,
+          stats: {
+            queued,
+            running,
+            completed,
+            failed,
+            dlq: q._count.deadLetterJobs,
+            total: q._count.jobs,
+          },
+        };
+      })
+    );
+
+    res.status(200).json({
+      success: true,
+      data: queuesWithStats,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+queueRouter.get('/retry-policies', async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const policies = await prisma.retryPolicy.findMany({
+      orderBy: { name: 'asc' },
+    });
+    res.status(200).json({
+      success: true,
+      data: policies,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 // --- Project Scoped Queue Endpoints ---
 
